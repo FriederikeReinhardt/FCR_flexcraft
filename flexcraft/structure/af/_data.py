@@ -12,11 +12,12 @@ import chex
 from chex import Array
 import tree
 
-from colabdesign.af.alphafold.model.geometry import Vec3Array
-from colabdesign.af.alphafold.model.modules import pseudo_beta_fn
-from colabdesign.af.alphafold.model.all_atom_multimer import atom14_to_atom37, atom37_to_atom14
-from colabdesign.af.prep import prep_input_features
-import colabdesign.af.inputs as cd_inputs
+from flexcraft.structure._colab_af.alphafold.model.geometry import Vec3Array
+from flexcraft.structure._colab_af.alphafold.model.modules import pseudo_beta_fn
+from flexcraft.structure._colab_af.alphafold.model.all_atom_multimer import atom14_to_atom37, atom37_to_atom14
+from flexcraft.structure._colab_af.prep import prep_input_features
+import flexcraft.structure._colab_af.inputs as cd_inputs
+import flexcraft.sequence.aa_codes as aas
 
 import salad.aflib.common.protein as af_protein
 
@@ -53,6 +54,8 @@ class AFInput:
 
     @staticmethod
     def from_sequence(sequence: Any) -> "AFInput":
+        if isinstance(sequence, str):
+            sequence = jax.nn.one_hot(aas.encode(sequence, aas.AF2_CODE), 20)
         return AFInput(
             prev_init=False,
             pos_init=False,
