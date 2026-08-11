@@ -23,6 +23,11 @@ class JoltzResult(eqx.Module):
     @property
     def distogram_bin_edges(self):
         return jnp.linspace(2.0, 22.0, 65)
+    
+    @property
+    def distogram_bin_centers(self):
+        edges = self.distogram_bin_edges
+        return (edges[1:] + edges[:-1]) / 2
 
     @property
     def sample_distogram(self):
@@ -357,6 +362,8 @@ class JoltzResult(eqx.Module):
             plddt=self.plddt.mean(axis=0) if len(self.plddt.shape) == 2 else self.plddt,
         )).untie()
 
+    def save(self, path: str):
+        np.savez_compressed(path, **{k: np.array(v) for k, v in self.data.items()})
 
 @dataclass
 class JoltzPrediction:
@@ -378,3 +385,6 @@ class JoltzPrediction:
     def save_cif(self, path, sample_index=0):
         self.writer.save_cif(path, self.data["samples"][sample_index][None],
                              plddt=self.data["confidence"].plddt[sample_index][None])
+
+    def save(self, path):
+        self.result.save(path)
