@@ -412,6 +412,69 @@ class JoltzInput(eqx.Module):
     def set_dna(self, sequence, start=0):
         return self._set_sequence(sequence, start=start, seq_slice=_DNA_SLICE, seq_count=4)
 
+    def set_template(self, coords, start=0, mask=None, restype=None, template_id=0) -> "JoltzInput":
+        """
+        Set template from coordinates without needing a cif. 
+        coords are assumed to be (L, x, 3) with the backbone atoms N, Ca, C at 0,1,2.
+        Start: query token offset where template region begins.
+        mask: (L,) mask of which residues are present in the template. None means all residues are present.
+        restype: (L,), (L, 20), or (L, 33). Integer DesignData/AF2 residue types,
+        standard-AA one-hot, Boltz-token one-hot, or None to use query residues.
+        template_id: which slot of template features to set. 0 for the single block in the dummy (T=1).
+        """
+        result = self.copy()
+        L = coords.shape[0]
+        sl = slice(start, start + L)
+        tid = template_id
+        
+        rot, t = backbone_to_template_geometry(coords) # (L, 3, 3), (L, 3), t is just Ca
+        cb = compute_pseudo_cb(coords) # (L, 3)
+        
+        # sanity check: positions are only valid if cb is there and if wanted in case a mask is given, sanity check is not really relevant for predicted structures but rather partially resolved structures
+        finite = jnp.isfinite(coords[:,:3]).all(axis=(1,2))         # (L,)
+        m = finite if mask is None else (mask.astype(bool) & finite) # (L,)
+        m = m.astype(bool)
+        keep = m[:, None]
+        rot = jnp.where(keep[..., None], rot, 0.0) # (L, 3, 3)
+        t = jnp.where(keep, t, 0.0)                 # (L, 3)
+        cb = jnp.where(keep, cb, 0.0)                 # (L, 3)
+        
+        if restype is None:
+            restype = result.features["res_type"][0, sl] # (L, 33), reuses query if no other sequence is given
+        elif restype.ndim == 1:
+            restype = jnp.asarray(restype)
+            restype = jnp.where(restype == 20, _AA_UNK, restype + 2)
+            restype = jax.nn.one_hot(restype, 33)
+        elif restype.shape[-1] == 20:
+            restype = jnp.pad(restype, ((0, 0), (2, 11))) # pad to 33 tokens if restype is given as 20 tokens
+        elif restype.shape[-1] != 33:
+            raise ValueError(f"restype must be shape (L,), (L, 20), or (L, 33), got {restype.shape}")
+        restype = restype.astype(jnp.float32)
+        
+        asym = result.features["asym_id"][0] # (N,)
+        in_region_chain = (asym[:, None] == asym[sl][None, :]).any(axis=1)    # (N,)
+        vis = jnp.where(in_region_chain, float(tid), (-1.0 - asym)).astype(jnp.float32)  # (N,)
+        
+        N = result.features["template_mask"].shape[2]
+        assert start + L <= N, f"template region {start}:{start+L} exceeds {N} tokens"
+
+        # write to features
+        writes = [
+                ("template_frame_rot",  rot,     (0, tid, sl)),
+                ("template_frame_t",    t,       (0, tid, sl)),
+                ("template_ca",         t,       (0, tid, sl)),   # CA == frame translation
+                ("template_cb",         cb,      (0, tid, sl)),
+                ("template_mask",       m,       (0, tid, sl)),
+                ("template_mask_cb",    m,       (0, tid, sl)),
+                ("template_mask_frame", m,       (0, tid, sl)),
+                ("template_restype",    restype, (0, tid, sl)),
+                ("visibility_ids",      vis,     (0, tid)),        # whole token row
+            ]
+        for k, value, idx in writes:
+            result.features[k] = jnp.asarray(result.features[k], jnp.float32).at[idx].set(value)
+
+        return result
+
 def substitute_aa(features, aa_one_hot):
     features["res_type"] = jnp.array(features["res_type"]).astype(jnp.float32)
     features["msa"] = jnp.array(features["msa"]).astype(jnp.float32)
