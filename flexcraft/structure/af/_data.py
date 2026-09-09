@@ -498,6 +498,22 @@ class AFResult:
         """Distogram predicted distance of pairs of amino acid residues."""
         return self._mean_of_binned("distogram")
 
+    @property
+    def distogram(self):
+        return jax.nn.softmax(self.result["distogram"]["logits"], axis=-1)
+    
+    @property
+    def log_distogram(self):
+        return jax.nn.log_softmax(self.result["distogram"]["logits"], axis=-1)
+        
+    @property
+    def distogram_bin_edges(self):
+        return self.result["distogram"]["bin_edges"]
+
+    @property
+    def distogram_bin_centers(self):
+        return (self.distogram_bin_edges[1:] + self.distogram_bin_edges[:-1]) / 2
+
     def to_data(self) -> DesignData:
         """Convert an AFResult to DesignData."""
         atom14, mask14 = self.atom14
@@ -575,6 +591,21 @@ class AFResult:
         return self.chain_contact_score(
             chain, chain, contact_distance=contact_distance,
             min_resi_distance=min_resi_distance, num_contacts=num_contacts)
+
+    def index_contact_score(self, target_index, source_index, contact_distance=14.0,
+                            min_resi_distance=10, num_contacts=25):
+        entropy = self.contact_entropy(contact_distance=contact_distance)
+        resi_dist = abs(self.residue_index[:, None] - self.residue_index[None, :])
+        other_chain = self.chain_index[:, None] != self.chain_index[None, :]
+        entropy = jnp.where((resi_dist >= min_resi_distance) + other_chain > 0, entropy, 1e6)
+        entropy = jnp.where(target_index[None, :], entropy, 1e6)
+        # NOTE: Ensure that only valid entries are averaged
+        sorted_entropy = entropy.sort(axis=1)[:, :num_contacts]
+        is_valid_entropy = sorted_entropy < 1e5
+        mean_entropy = (sorted_entropy * is_valid_entropy).sum(axis=-1) / jnp.maximum(1, is_valid_entropy.sum(axis=-1))
+        contact_score = (mean_entropy * source_index).sum()
+        contact_score /= jnp.maximum(1, source_index.sum())
+        return contact_score
 
     def save_pdb(self, path):
         """Save an AFResult in PDB format at `path`."""

@@ -227,6 +227,15 @@ class JoltzSpec:
         ))
         return self
 
+    def add_pocket(self, binder, *contacts, max_distance=6.0):
+        self.constraints.append(dict(
+            kind="pocket",
+            binder=binder,
+            contacts=contacts,
+            max_distance=max_distance
+        ))
+        return self
+
     def add_constraint(self, constraint):
         self.constraints.append(constraint)
         return self
@@ -412,7 +421,9 @@ class JoltzInput(eqx.Module):
     def set_dna(self, sequence, start=0):
         return self._set_sequence(sequence, start=start, seq_slice=_DNA_SLICE, seq_count=4)
 
-    def set_template(self, coords, start=0, mask=None, restype=None, template_id=0) -> "JoltzInput":
+    def set_template(self, coords=None, start=0,
+                     template=None, mask=None,
+                     restype=None, template_id=0) -> "JoltzInput":
         """
         Set template from coordinates without needing a cif. 
         coords are assumed to be (L, x, 3) with the backbone atoms N, Ca, C at 0,1,2.
@@ -423,6 +434,10 @@ class JoltzInput(eqx.Module):
         template_id: which slot of template features to set. 0 for the single block in the dummy (T=1).
         """
         result = self.copy()
+        if template is not None:
+            result.features.update(template)
+            result.features["template_restype"] = result.features["template_restype"].at[0].set(result.features["res_type"][0])
+            return result
         L = coords.shape[0]
         sl = slice(start, start + L)
         tid = template_id
@@ -474,6 +489,21 @@ class JoltzInput(eqx.Module):
             result.features[k] = jnp.asarray(result.features[k], jnp.float32).at[idx].set(value)
 
         return result
+
+    @property
+    def template(self):
+        return {
+            k: self.features[k]
+            for k in (
+                "template_frame_rot",
+                "template_frame_t",
+                "template_ca",
+                "template_cb",
+                "template_mask",
+                "template_mask_cb",
+                "template_mask_frame",
+                "visibility_ids",)
+        }
 
 def substitute_aa(features, aa_one_hot):
     features["res_type"] = jnp.array(features["res_type"]).astype(jnp.float32)
@@ -559,6 +589,15 @@ constraints:"""
     - contact:
         token1: [{constraint['token_1']['chain']}, {constraint['token_1']['target']}]
         token2: [{constraint['token_2']['chain']}, {constraint['token_2']['target']}]
+        max_distance: {constraint['max_distance']}"""
+        elif constraint["kind"] == "pocket":
+            contacts = ", ".join([
+                f"[{chain}, {res_atm}]"
+                for chain, res_atm in constraint['contacts']])
+            constraint_yaml += f"""
+    - pocket:
+        binder: {constraint['binder']}
+        contacts: [{contacts}]
         max_distance: {constraint['max_distance']}"""
         else:
             raise NotImplementedError(f"Unknown constraint type {constraint['kind']}.")

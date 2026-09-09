@@ -1,14 +1,17 @@
 from typing import Any
 from dataclasses import dataclass
 
+import numpy as np
+
 import jax
 import jax.numpy as jnp
 import equinox as eqx
 from flexcraft.data.data import DesignData
-from flexcraft.structure.boltz._utils import *
-from flexcraft.structure.boltz._data import Joltz2Writer
+from flexcraft.structure.common._utils import (
+    broadcast_array_to_atomX, atomX_to_atom_array, atom_array_to_atomX, get_contact_atom
+)
 
-class JoltzResult(eqx.Module):
+class AF3LikeResult(eqx.Module):
     data: dict
 
     @property
@@ -23,15 +26,6 @@ class JoltzResult(eqx.Module):
     @property
     def distogram_bin_edges(self):
         return jnp.linspace(2.0, 22.0, 65)
-    
-    @property
-    def distogram_bin_centers(self):
-        edges = self.distogram_bin_edges
-        return (edges[1:] + edges[:-1]) / 2
-
-    @property
-    def distogram_mean(self):
-        return (self.distogram * self.distogram_bin_centers).sum(axis=-1)
 
     @property
     def sample_distogram(self):
@@ -165,12 +159,16 @@ class JoltzResult(eqx.Module):
     @property
     def cb_samples(self):
         atom24, mask24 = self.atom24_samples
-        return jax.vmap(get_contact_atom, (0, None), 0)(atom24, self.data["features"]["mol_type"][0])
+        return jax.vmap(get_contact_atom, (0, None), 0)(atom24, self.mol_type)
 
     @property
     def cb(self):
         atom24, mask24 = self.atom24
-        return get_contact_atom(atom24, self.data["features"]["mol_type"][0])
+        return get_contact_atom(atom24, self.mol_type)
+
+    @property
+    def mol_type(self):
+        return self.data["features"]["mol_type"][0]
 
     def _transform_sampled(self, sampled_property, num_atoms=24):
         if self.is_single_sample:
@@ -209,8 +207,6 @@ class JoltzResult(eqx.Module):
         else:
             plddt_logits = plddt_logits[:, 0]
         return plddt_logits
-        #plddt24, mask24 = self._transform_sampled(self.data["confidence"].plddt_logits, num_atoms=24)
-        #return plddt24, mask24
 
     @property
     def plddt(self):
@@ -220,9 +216,6 @@ class JoltzResult(eqx.Module):
         else:
             plddt = plddt[:, 0]
         return plddt
-        # plddt24, mask24 = self._transform_sampled(self.data["confidence"].plddt, num_atoms=24)
-        # plddt = (plddt24 * mask24).sum(axis=-1) / jnp.maximum(1, mask24.sum(axis=-1))
-        # return plddt
     
     @property
     def pae_logits(self):
@@ -264,10 +257,6 @@ class JoltzResult(eqx.Module):
     @property
     def iptm(self):
         return self.index_iptm(self.chain_index)
-        # ptm = self.ptm_matrix() # FIXME: adjust L?
-        # chain = self.chain_index
-        # other_chain = chain[:, None] != chain[None, :]
-        # return ((ptm * other_chain).sum(-1) / jnp.maximum(1, other_chain.sum(-1))).max()
 
     def ipsae(self, chain_index=None, raw_pae_threshold=15.0):
         raw_pae = self.pae * 32
@@ -365,59 +354,6 @@ class JoltzResult(eqx.Module):
             batch_index=jnp.zeros_like(self.residue_index),
             plddt=self.plddt.mean(axis=0) if len(self.plddt.shape) == 2 else self.plddt,
         )).untie()
-        
-    def chain_contact_frequency(self, target_chain=0, binder_chain=1,
-                                  contact_distance=8.0) -> jax.Array:
-        """Per-residue frequency with which each target_chain residue contacts
-        binder_chain, aggregated across all sampled structures.
-        Output is a 1D array of length L (full sequence) with values between 0
-        and 1; entries outside target_chain are 0.
-        Contact frequency is computed as the fraction of sampled structures in
-        which the contact atom (pseudo-CB) of the target residue is within
-        contact_distance of the contact atom of any binder_chain residue.
-        """
-        atom24, _ = self.atom24_samples
-        if self.is_single_sample:
-            atom24 = atom24[None]                          # (S, L, 24, 3), S == 1
-        mol_type = self.data["features"]["mol_type"][0]
-        contact_atom = jax.vmap(get_contact_atom, (0, None), 0)(atom24, mol_type)  # (S, L, 3)
-
-        chain = self.chain_index
-        is_target = chain == target_chain                  # (L,)
-        is_binder = chain == binder_chain                  # (L,)
-        pair_mask = is_target[:, None] & is_binder[None, :]  # (L, L)
-
-        def per_sample(contact_atom):                      # (L, 3)
-            dist = jnp.linalg.norm(
-                contact_atom[:, None, :] - contact_atom[None, :, :], axis=-1)  # (L, L)
-            return ((dist < contact_distance) & pair_mask).any(axis=1)        # (L,)
-
-        contacts = jax.vmap(per_sample, in_axes=0, out_axes=0)(contact_atom)  # (S, L)
-        return contacts.mean(axis=0)                       # (L,)
 
     def save(self, path: str):
         np.savez_compressed(path, **{k: np.array(v) for k, v in self.data.items()})
-
-@dataclass
-class JoltzPrediction:
-    data: Any
-    writer: Joltz2Writer
-    @property
-    def result(self):
-        return JoltzResult(data=self.data)
-
-    def save_pdb(self, path, sample_index=0):
-        is_multisample = len(self.data["samples"].shape) == 4
-        if is_multisample:
-            self.writer.save_pdb(path, self.data["samples"][sample_index],
-                                 plddt=self.data["confidence"].plddt[sample_index])
-        else:
-            self.writer.save_pdb(path, self.data["samples"],
-                                 plddt=self.data["confidence"].plddt)
-
-    def save_cif(self, path, sample_index=0):
-        self.writer.save_cif(path, self.data["samples"][sample_index][None],
-                             plddt=self.data["confidence"].plddt[sample_index][None])
-
-    def save(self, path):
-        self.result.save(path)
