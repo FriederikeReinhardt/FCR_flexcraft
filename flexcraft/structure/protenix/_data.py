@@ -4,6 +4,7 @@ from typing import Dict, Sequence
 
 import gemmi
 import numpy as np
+import jax
 import jax.numpy as jnp
 
 import tempfile
@@ -58,10 +59,26 @@ class ProtenixWriter:
         structure.add_model(model)
         return structure
 
-    def save_pdb(self, path, sample_atom_coords, plddt=None):
+    def result_to_data(self, result, sample_index=0):
+        is_multisample = len(result.data["samples"].shape) == 4
+        plddt = (jax.nn.softmax(result.data["confidence"].plddt_logits) * (jnp.arange(50) + 0.5)).sum(axis=-1) / 50
+        coords = result.data["samples"]
+        if is_multisample:
+            plddt = plddt[sample_index, 0]
+            coords = coords[sample_index, 0]
+        else:
+            plddt = plddt[0]
+            coords = coords[0]
+        return np.array(coords), np.array(plddt)
+
+    def save_pdb(self, path, sample_atom_coords=None, plddt=None, result=None, ):
+        if result is not None:
+            sample_atom_coords, plddt = self.result_to_data(result)
         self.to_gemmi(sample_atom_coords, plddt=plddt).write_minimal_pdb(path)
 
-    def save_cif(self, path, sample_atom_coords, plddt=None):
+    def save_cif(self, path, sample_atom_coords=None, plddt=None, result=None):
+        if result is not None:
+            sample_atom_coords, plddt = self.result_to_data(result)
         structure = self.to_gemmi(sample_atom_coords, plddt=plddt)
         document = structure.make_mmcif_document()
         document.write_file(path)

@@ -1,4 +1,7 @@
 from typing import Any
+from dataclasses import dataclass
+
+import numpy as np
 
 import jax
 import jax.numpy as jnp
@@ -50,6 +53,7 @@ class ProtenixResult(AF3LikeResult):
             return jnp.fill_diagonal(pae, 0.0, inplace=False) / 32
         return jax.vmap(lambda x: jnp.fill_diagonal(x, 0.0, inplace=False))(pae) / 32
 
+@dataclass
 class ProtenixPrediction:
     data: Any
     writer: ProtenixWriter
@@ -57,18 +61,25 @@ class ProtenixPrediction:
     def result(self):
         return ProtenixResult(data=self.data)
 
-    def save_pdb(self, path, sample_index=0):
+    def prep_data(self, sample_index=0):
         is_multisample = len(self.data["samples"].shape) == 4
+        plddt = (jax.nn.softmax(self.data["confidence"].plddt_logits) * (jnp.arange(50) + 0.5)).sum(axis=-1) / 50
+        coords = self.data["samples"]
         if is_multisample:
-            self.writer.save_pdb(path, self.data["samples"][sample_index],
-                                 plddt=self.data["confidence"].plddt[sample_index])
+            plddt = plddt[sample_index, 0]
+            coords = coords[sample_index, 0]
         else:
-            self.writer.save_pdb(path, self.data["samples"],
-                                 plddt=self.data["confidence"].plddt)
+            plddt = plddt[0]
+            coords = coords[0]
+        return np.array(coords), np.array(plddt)
 
+    def save_pdb(self, path, sample_index=0):
+        coords, plddt = self.prep_data(sample_index=sample_index)
+        self.writer.save_pdb(path, coords, plddt=plddt)
+    
     def save_cif(self, path, sample_index=0):
-        self.writer.save_cif(path, self.data["samples"][sample_index][None],
-                             plddt=self.data["confidence"].plddt[sample_index][None])
+        coords, plddt = self.prep_data(sample_index=sample_index)
+        self.writer.save_cif(path, coords, plddt=plddt)
 
     def save(self, path):
         self.result.save(path)

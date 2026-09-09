@@ -42,6 +42,10 @@ class Protenix:
             sample_parallel=sample_parallel,
             num_recycle=num_recycle,
             stop_recycle_gradient=stop_recycle_gradient)
+        evaluator = eqx.tree_at(
+            lambda m: (m.model.gamma0, m.model.step_scale_eta, m.model.noise_scale_lambda, m.model.N_steps),
+            evaluator, 
+            (0.0, 1.0, 1.0, sampling_steps))
         # return evaluator
         evaluator_params, evaluator_static = eqx.partition(evaluator, eqx.is_array)
         def _evaluator(params):
