@@ -413,6 +413,11 @@ class AFResult:
     def pae(self):
         """Per-residue pair predicted aligned error."""
         return self._mean_of_binned("predicted_aligned_error", has_edges=False)
+
+    @property
+    def pae_logits(self):
+        """Per-residue pair predicted aligned error logits."""
+        return self.result["predicted_aligned_error"]["logits"]
     
     @property
     def ipae(self):
@@ -484,10 +489,11 @@ class AFResult:
         result = result.max(axis=0)
         return result
 
-    def ipsae(self, pae_cutoff=0.5):
+    def ipsae(self, chain_index=None, pae_cutoff=0.5):
         mask = self.pae < pae_cutoff
-        chain = self.inputs["asym_id"]
-        other_chain = chain[:, None] != chain[None, :]
+        if chain_index is None:
+            chain_index = self.inputs["asym_id"]
+        other_chain = chain_index[:, None] != chain_index[None, :]
         mask *= other_chain
         L = mask.sum(axis=1)[:, None]
         ptm = mask * self.ptm_matrix(L)
@@ -508,7 +514,10 @@ class AFResult:
         
     @property
     def distogram_bin_edges(self):
-        return self.result["distogram"]["bin_edges"]
+        bin_edges = self.result["distogram"]["bin_edges"]
+        bin_step = bin_edges[1] - bin_edges[0]
+        bin_edges = jnp.concatenate((bin_edges[:1] - bin_step, bin_edges, bin_edges[-1:] + bin_step), axis=0)
+        return bin_edges
 
     @property
     def distogram_bin_centers(self):
@@ -606,6 +615,29 @@ class AFResult:
         contact_score = (mean_entropy * source_index).sum()
         contact_score /= jnp.maximum(1, source_index.sum())
         return contact_score
+
+    def index_iptm(self, chain_index=None):
+        if chain_index is None:
+            chain_index = self.chain_index
+        ptm = self.ptm_matrix()
+        other_chain = chain_index[:, None] != chain_index[None, :]
+        return ((ptm * other_chain).sum(-1) / jnp.maximum(1, other_chain.sum(-1))).max()
+
+    def index_ptm_score(self, chain_index=None):
+        if chain_index is None:
+            chain_index = self.chain_index
+        pae_logits = self.pae_logits
+        num_aa = pae_logits.shape[0]
+        num_aa = max(num_aa, 19)
+
+        d0 = 1.24 * (num_aa - 15) ** (1.0 / 3) - 1.8
+        bin_centers = (jnp.arange(64) / 64 + 1 / 128) * 32
+
+        scale = 1.0 / (1 + bin_centers ** 2 / d0 ** 2)
+        score = jax.nn.logsumexp(a=pae_logits, b=scale, axis=-1)
+        other_chain = chain_index[:, None] != chain_index[None, :]
+        score = (score * other_chain).sum() / jnp.maximum(1, other_chain.sum())
+        return score
 
     def save_pdb(self, path):
         """Save an AFResult in PDB format at `path`."""
